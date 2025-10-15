@@ -23,6 +23,7 @@ volume_mode: ""      # "", "Filesystem", or "Block"
 
 # Image to import (CDI HTTP source)
 image_url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+            
 
 # First-boot access
 ssh_public_key: ""   # e.g. "ssh-ed25519 AAAA... user@host"; leave blank to keep password-only for first boot

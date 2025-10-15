@@ -119,12 +119,9 @@
                 resources:
                   requests:
                     storage: "{{ disk_size }}"
-                {% if storage_class | length > 0 %}
-                storageClassName: "{{ storage_class }}"
-                {% endif %}
-                {% if volume_mode | length > 0 %}
-                volumeMode: "{{ volume_mode }}"
-                {% endif %}
+                # Use 'omit' to drop keys when the var is empty
+                storageClassName: "{{ (storage_class | length > 0) | ternary(storage_class, omit) }}"
+                volumeMode: "{{ (volume_mode | length > 0) | ternary(volume_mode, omit) }}"
                 accessModes:
                   - ReadWriteOnce
         template:

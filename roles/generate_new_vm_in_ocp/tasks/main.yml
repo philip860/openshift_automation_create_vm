@@ -2,5 +2,5 @@
 # tasks file for generate_new_vm_in_ocp
 
 - name: Include new_vm_setup.yml file
-  ansible.builtin.indclude_tasks:
+  ansible.builtin.include_tasks:
     file: new_vm_setup.yml

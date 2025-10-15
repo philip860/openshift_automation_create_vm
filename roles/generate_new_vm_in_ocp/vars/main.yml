@@ -6,7 +6,7 @@
     cpu_cores: 2
     memory: "2Gi"
     disk_size: "30Gi"
-    storage_class: ""   # e.g., 'lvms-vg1', 'ocs-storagecluster-ceph-rbd' — empty uses cluster default
+    storage_class: "lvms-vg1"   # e.g., 'lvms-vg1', 'ocs-storagecluster-ceph-rbd' — empty uses cluster default
     volume_mode: ""     # "", "Filesystem", or "Block" (leave "" unless you need a specific mode)
     image_url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
     ssh_public_key: ""  # e.g., "ssh-ed25519 AAAA... user@host"; leave blank to keep password-only for first boot

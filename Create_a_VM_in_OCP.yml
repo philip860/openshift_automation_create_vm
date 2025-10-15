@@ -1,0 +1,7 @@
+---
+- name: Create A New VM In OpenShift Virtulization
+  hosts: localhost
+  become: true
+  gather_facts: false
+  roles:
+    - generate_new_vm_in_ocp

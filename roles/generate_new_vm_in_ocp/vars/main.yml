@@ -1,2 +1,13 @@
 ---
 # vars file for generate_new_vm_in_ocp
+    kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
+    namespace: "virtual-machines"
+    vm_name: "centos9-vm-demo"
+    cpu_cores: 2
+    memory: "2Gi"
+    disk_size: "30Gi"
+    storage_class: ""   # e.g., 'lvms-vg1', 'ocs-storagecluster-ceph-rbd' — empty uses cluster default
+    volume_mode: ""     # "", "Filesystem", or "Block" (leave "" unless you need a specific mode)
+    image_url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+    ssh_public_key: ""  # e.g., "ssh-ed25519 AAAA... user@host"; leave blank to keep password-only for first boot
+    run_strategy: "Always"  # Always | RerunOnFailure | Halt

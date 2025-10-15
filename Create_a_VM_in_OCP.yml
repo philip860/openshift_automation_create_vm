@@ -3,5 +3,12 @@
   hosts: localhost
   become: true
   gather_facts: false
+  vars:
+    namespace: "virtual-machines"
+    vm_name: "centos9-vm-demo"
+
+
+
+
   roles:
     - generate_new_vm_in_ocp

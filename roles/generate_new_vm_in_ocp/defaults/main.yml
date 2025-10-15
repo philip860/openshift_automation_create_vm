@@ -1,39 +1,30 @@
 ---
-# defaults file for generate_new_vm_in_ocp
-
-# ===== Role defaults (safe to override at play/extra-vars) =====
-
-# Kubeconfig path (falls back to ~/.kube/config when not set)
+# Cluster access
 kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
-
-# Target namespace/project
 namespace: "virtual-machines"
 
-# VM identity
-vm_name: "centos9-vm"
-
-# Sizing
+# VM identity & sizing
+vm_name: "centos9-vm-demo-1"
 cpu_cores: 2
-memory: "4Gi"
+memory: "2Gi"
 disk_size: "30Gi"
 
-# Storage settings
-storage_class: ""    # e.g. 'lvms-vg1', 'ocs-storagecluster-ceph-rbd' — empty uses cluster default
-volume_mode: ""      # "", "Filesystem", or "Block"
+# Storage
+storage_class: "lvms-vg1"      # e.g. 'lvms-vg1', 'ocs-storagecluster-ceph-rbd'; empty = default SC
+volume_mode: ""        # "", "Filesystem", or "Block" (try "Filesystem" if imports fail)
 
-# Image to import (CDI HTTP source)
+# Image (CDI HTTP import)
 image_url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
-            
 
-# First-boot access
-ssh_public_key: ""   # e.g. "ssh-ed25519 AAAA... user@host"; leave blank to keep password-only for first boot
+# First boot access
+ssh_public_key: ""     # e.g. "ssh-ed25519 AAAA... user@host"
 initial_password: "changeme"
-ssh_password_auth: true  # set false if you only want key-based auth
+ssh_password_auth: true
 
-# VM run strategy
-run_strategy: "Always"   # Always | RerunOnFailure | Halt
+# Start policy
+run_strategy: "Always" # Always | RerunOnFailure | Halt
 
-# Wait tuning
+# Waits
 dv_wait_retries: 60
 dv_wait_delay: 20
 vm_wait_retries: 30

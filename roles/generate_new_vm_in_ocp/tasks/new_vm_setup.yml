@@ -131,7 +131,7 @@
           spec:
             domain:
               cpu:
-                cores: {{ cpu_cores }}
+                cores: "{{ cpu_cores | int }}"
               resources:
                 requests:
                   memory: "{{ memory }}"

@@ -1,0 +1,205 @@
+    # -------------------------
+    # PREFLIGHT / VALIDATIONS
+    # -------------------------
+
+    - name: Preflight | Verify API server is reachable by listing Namespaces (read-only)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+        name: default
+      register: api_check
+
+    - name: Preflight | Verify KubeVirt VirtualMachine CRD exists (read-only)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: virtualmachines.kubevirt.io
+      register: crd_vm
+
+    - name: Preflight | Verify CDI DataVolume CRD exists (read-only)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: datavolumes.cdi.kubevirt.io
+      register: crd_dv
+
+    - name: Preflight | Fail early if KubeVirt/CDI CRDs are missing
+      assert:
+        that:
+          - crd_vm.resources | length > 0
+          - crd_dv.resources | length > 0
+        fail_msg: >
+          Required CRDs not found. Ensure OpenShift Virtualization (KubeVirt) and CDI are installed
+          (virtualmachines.kubevirt.io, datavolumes.cdi.kubevirt.io).
+
+    - name: Preflight | If storage_class set, ensure it exists (read-only)
+      when: storage_class | length > 0
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+        name: "{{ storage_class }}"
+      register: sc_info
+
+    - name: Preflight | Fail if specified StorageClass does not exist
+      when: storage_class | length > 0
+      assert:
+        that:
+          - sc_info.resources | length > 0
+        fail_msg: "StorageClass '{{ storage_class }}' not found. Set a valid class or leave it empty."
+
+    # -------------------------
+    # PLAN (Displayed in --check)
+    # -------------------------
+
+    - name: Plan | Show intended objects and parameters in check mode (no changes)
+      when: ansible_check_mode
+      debug:
+        msg:
+          - "Would ensure Namespace '{{ namespace }}' exists."
+          - "Would create/ensure VM '{{ vm_name }}' with {{ cpu_cores }} vCPU, {{ memory }} RAM."
+          - "Would provision DataVolume '{{ vm_name }}-rootdisk' = {{ disk_size }}, SC='{{ storage_class | default('default', true) }}', mode='{{ volume_mode | default('unspecified', true) }}'."
+          - "Would import image from '{{ image_url }}'."
+          - "Would set runStrategy='{{ run_strategy }}'."
+          - "Would add SSH key (present? {{ (ssh_public_key | length > 0) | ternary('yes','no') }}) and enable qemu-guest-agent."
+
+    # -------------------------
+    # MUTATING: CREATE/UPDATE
+    # -------------------------
+
+    - name: Ensure target Namespace exists (skipped in check mode)
+      when: not ansible_check_mode
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+        name: "{{ namespace }}"
+        state: present
+
+    - name: Define/Apply VirtualMachine with DataVolumeTemplate (skipped in check mode)
+      when: not ansible_check_mode
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ namespace }}"
+        state: present
+        definition:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: "{{ vm_name }}"
+            labels:
+              app: "{{ vm_name }}"
+          spec:
+            runStrategy: "{{ run_strategy }}"
+            dataVolumeTemplates:
+              - metadata:
+                  name: "{{ vm_name }}-rootdisk"
+                spec:
+                  source:
+                    http:
+                      url: "{{ image_url }}"
+                  storage:
+                    resources:
+                      requests:
+                        storage: "{{ disk_size }}"
+                    {% if storage_class | length > 0 %}storageClassName: "{{ storage_class }}"{% endif %}
+                    {% if volume_mode | length > 0 %}volumeMode: "{{ volume_mode }}"{% endif %}
+                    accessModes: ["ReadWriteOnce"]
+            template:
+              metadata:
+                labels:
+                  kubevirt.io/domain: "{{ vm_name }}"
+              spec:
+                domain:
+                  cpu:
+                    cores: {{ cpu_cores }}
+                  resources:
+                    requests:
+                      memory: "{{ memory }}"
+                  devices:
+                    disks:
+                      - name: rootdisk
+                        disk:
+                          bus: virtio
+                      - name: cloudinitdisk
+                        disk:
+                          bus: virtio
+                    interfaces:
+                      - name: default
+                        masquerade: {}
+                networks:
+                  - name: default
+                    pod: {}
+                volumes:
+                  - name: rootdisk
+                    dataVolume:
+                      name: "{{ vm_name }}-rootdisk"
+                  - name: cloudinitdisk
+                    cloudInitNoCloud:
+                      userData: |
+                        #cloud-config
+                        user: cloud-user
+                        password: "changeme"
+                        chpasswd: { expire: False }
+                        ssh_pwauth: true
+                        {% if ssh_public_key | length > 0 %}
+                        ssh_authorized_keys:
+                          - "{{ ssh_public_key }}"
+                        {% endif %}
+                        package_update: true
+                        runcmd:
+                          - [ sh, -c, "dnf -y install qemu-guest-agent && systemctl enable --now qemu-guest-agent || true" ]
+
+    # -------------------------
+    # POST-APPLY WAITS (skip in check mode)
+    # -------------------------
+
+    - name: Wait | DataVolume import to complete (root disk ready) (skipped in check mode)
+      when: not ansible_check_mode
+      retries: 60
+      delay: 20
+      register: dv
+      until: >
+        (dv.resources | length) > 0 and
+        (dv.resources[0].status is defined) and
+        (dv.resources[0].status.phase | default('') == "Succeeded")
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        name: "{{ vm_name }}-rootdisk"
+        namespace: "{{ namespace }}"
+
+    - name: Wait | VM to reach a runnable state (skipped in check mode)
+      when: not ansible_check_mode
+      retries: 30
+      delay: 10
+      register: vm
+      until: >
+        (vm.resources | length) > 0 and
+        (vm.resources[0].status is defined) and
+        (vm.resources[0].status.printableStatus | default('') in ["Running", "Paused", "Provisioning"])
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ namespace }}"
+
+    # -------------------------
+    # OUTPUT
+    # -------------------------
+
+    - name: Output | Summarize result (works in normal & check modes)
+      debug:
+        msg:
+          - "Namespace: {{ namespace }}"
+          - "VM name: {{ vm_name }}"
+          - "CPU/Memory: {{ cpu_cores }} cores / {{ memory }}"
+          - "Disk: {{ disk_size }} (SC='{{ storage_class | default('default', true) }}', mode='{{ volume_mode | default('unspecified', true) }}')"
+          - "Image: {{ image_url }}"
+          - "RunStrategy: {{ run_strategy }}"
+          - "Note: In --check, no changes were made; see 'Plan' above."

@@ -112,89 +112,101 @@
       runcmd:
         - [ sh, -c, "dnf -y install qemu-guest-agent && systemctl enable --now qemu-guest-agent || true" ]
 
-- name: Build | Render base VirtualMachine definition
+- name: Build | Render VirtualMachine definition from JSON
   ansible.builtin.set_fact:
-    vm_definition_base: "{{ vm_definition_base_yaml | from_yaml }}"
+    vm_definition: "{{ vm_definition_json | from_json }}"
   vars:
-    vm_definition_base_yaml: |
-      apiVersion: kubevirt.io/v1
-      kind: VirtualMachine
-      metadata:
-        name: {{ vm_name }}
-        namespace: {{ namespace }}
-        labels:
-          app: {{ vm_name }}
-      spec:
-        runStrategy: {{ run_strategy }}
-        dataVolumeTemplates:
-          - metadata:
-              name: {{ vm_name }}-rootdisk
-            spec:
-              source:
-                http:
-                  url: {{ image_url }}
-              storage: {}
-        template:
-          metadata:
-            labels:
-              kubevirt.io/domain: {{ vm_name }}
-          spec:
-            domain:
-              cpu:
-                cores: {{ cpu_cores | int }}
-              resources:
-                requests:
-                  memory: {{ memory }}
-              devices:
-                disks:
-                  - name: rootdisk
-                    disk:
-                      bus: virtio
-                  - name: cloudinitdisk
-                    disk:
-                      bus: virtio
-                interfaces:
-                  - name: default
-                    masquerade: {}
-            networks:
-              - name: default
-                pod: {}
-            volumes:
-              - name: rootdisk
-                dataVolume:
-                  name: {{ vm_name }}-rootdisk
-              - name: cloudinitdisk
-                cloudInitNoCloud:
-                  userData: |
-{{ vm_cloud_init_userdata | indent(20, true) }}
-
-- name: Build | Merge DataVolume storage into VM definition
-  ansible.builtin.set_fact:
-    vm_definition: >-
-      {{
-        vm_definition_base
-        | combine(
+    vm_definition_json: |
+      {
+        "apiVersion": "kubevirt.io/v1",
+        "kind": "VirtualMachine",
+        "metadata": {
+          "name": {{ vm_name | to_json }},
+          "namespace": {{ namespace | to_json }},
+          "labels": {
+            "app": {{ vm_name | to_json }}
+          }
+        },
+        "spec": {
+          "runStrategy": {{ run_strategy | to_json }},
+          "dataVolumeTemplates": [
             {
-              'spec': {
-                'dataVolumeTemplates': [
-                  (
-                    vm_definition_base.spec.dataVolumeTemplates[0]
-                    | combine(
-                        {
-                          'spec': (
-                            vm_definition_base.spec.dataVolumeTemplates[0].spec
-                            | combine({'storage': vm_dv_storage}, recursive=True)
-                          )
-                        },
-                        recursive=True
-                      )
-                  )
-                ]
+              "metadata": {
+                "name": {{ (vm_name ~ '-rootdisk') | to_json }}
+              },
+              "spec": {
+                "source": {
+                  "http": {
+                    "url": {{ image_url | to_json }}
+                  }
+                },
+                "storage": {{ vm_dv_storage | to_json }}
+              }
+            }
+          ],
+          "template": {
+            "metadata": {
+              "labels": {
+                "kubevirt.io/domain": {{ vm_name | to_json }}
               }
             },
-            recursive=True
-          )
-      }}
+            "spec": {
+              "domain": {
+                "cpu": {
+                  "cores": {{ cpu_cores | int }}
+                },
+                "resources": {
+                  "requests": {
+                    "memory": {{ memory | to_json }}
+                  }
+                },
+                "devices": {
+                  "disks": [
+                    {
+                      "name": "rootdisk",
+                      "disk": {
+                        "bus": "virtio"
+                      }
+                    },
+                    {
+                      "name": "cloudinitdisk",
+                      "disk": {
+                        "bus": "virtio"
+                      }
+                    }
+                  ],
+                  "interfaces": [
+                    {
+                      "name": "default",
+                      "masquerade": {}
+                    }
+                  ]
+                }
+              },
+              "networks": [
+                {
+                  "name": "default",
+                  "pod": {}
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "rootdisk",
+                  "dataVolume": {
+                    "name": {{ (vm_name ~ '-rootdisk') | to_json }}
+                  }
+                },
+                {
+                  "name": "cloudinitdisk",
+                  "cloudInitNoCloud": {
+                    "userData": {{ vm_cloud_init_userdata | to_json }}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
 
 - name: Build | Show rendered VM definition
   ansible.builtin.debug:

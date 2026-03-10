@@ -89,12 +89,12 @@
 - name: Build | Add optional DataVolume storageClassName
   when: storage_class | length > 0
   ansible.builtin.set_fact:
-    vm_dv_storage: "{{ vm_dv_storage | combine({'storageClassName': storage_class}) }}"
+    vm_dv_storage: "{{ vm_dv_storage | combine({'storageClassName': storage_class}, recursive=True) }}"
 
 - name: Build | Add optional DataVolume volumeMode
   when: volume_mode | length > 0
   ansible.builtin.set_fact:
-    vm_dv_storage: "{{ vm_dv_storage | combine({'volumeMode': volume_mode}) }}"
+    vm_dv_storage: "{{ vm_dv_storage | combine({'volumeMode': volume_mode}, recursive=True) }}"
 
 - name: Build | Render cloud-init userData
   ansible.builtin.set_fact:
@@ -112,11 +112,11 @@
       runcmd:
         - [ sh, -c, "dnf -y install qemu-guest-agent && systemctl enable --now qemu-guest-agent || true" ]
 
-- name: Build | Render VirtualMachine definition
+- name: Build | Render base VirtualMachine definition
   ansible.builtin.set_fact:
-    vm_definition: "{{ vm_definition_yaml | from_yaml }}"
+    vm_definition_base: "{{ vm_definition_base_yaml | from_yaml }}"
   vars:
-    vm_definition_yaml: |
+    vm_definition_base_yaml: |
       apiVersion: kubevirt.io/v1
       kind: VirtualMachine
       metadata:
@@ -133,17 +133,7 @@
               source:
                 http:
                   url: {{ image_url }}
-              storage:
-{% for key, value in vm_dv_storage.items() %}
-                {{ key }}:
-{% if value is mapping %}
-{{ value | to_nice_yaml(indent=18) | indent(18, true) }}
-{% elif value is sequence and value is not string %}
-{{ value | to_nice_yaml(indent=18) | indent(18, true) }}
-{% else %}
-                  {{ value }}
-{% endif %}
-{% endfor %}
+              storage: {}
         template:
           metadata:
             labels:
@@ -177,6 +167,34 @@
                 cloudInitNoCloud:
                   userData: |
 {{ vm_cloud_init_userdata | indent(20, true) }}
+
+- name: Build | Merge DataVolume storage into VM definition
+  ansible.builtin.set_fact:
+    vm_definition: >-
+      {{
+        vm_definition_base
+        | combine(
+            {
+              'spec': {
+                'dataVolumeTemplates': [
+                  (
+                    vm_definition_base.spec.dataVolumeTemplates[0]
+                    | combine(
+                        {
+                          'spec': (
+                            vm_definition_base.spec.dataVolumeTemplates[0].spec
+                            | combine({'storage': vm_dv_storage}, recursive=True)
+                          )
+                        },
+                        recursive=True
+                      )
+                  )
+                ]
+              }
+            },
+            recursive=True
+          )
+      }}
 
 - name: Build | Show rendered VM definition
   ansible.builtin.debug:

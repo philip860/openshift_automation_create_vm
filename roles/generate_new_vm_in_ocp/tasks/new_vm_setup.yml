@@ -71,12 +71,105 @@
   ansible.builtin.debug:
     msg:
       - "Would ensure Namespace '{{ namespace }}' exists."
-      - "Would create VM '{{ vm_name }}' with {{ cpu_cores }} vCPU, {{ memory }} RAM."
+      - "Would create VM '{{ vm_name }}' with {{ cpu_cores | int }} vCPU, {{ memory }} RAM."
       - "Would create DataVolume '{{ vm_name }}-rootdisk' size {{ disk_size }}, SC='{{ storage_class | default('default', true) }}', mode='{{ volume_mode | default('unspecified', true) }}'."
       - "Would import image from '{{ image_url }}'. RunStrategy='{{ run_strategy }}'."
-      - "SSH key present? {{ (ssh_public_key | length > 0) | ternary('yes','no') }}; password auth: {{ ssh_password_auth }}."
+      - "SSH key present? {{ (ssh_public_key | length > 0) | ternary('yes', 'no') }}; password auth: {{ ssh_password_auth | bool }}."
 
-# 3) CREATE/APPLY (skipped in --check)
+# 3) BUILD DEFINITIONS
+- name: Build | Base DataVolume storage definition
+  ansible.builtin.set_fact:
+    vm_dv_storage:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: "{{ disk_size }}"
+
+- name: Build | Add optional DataVolume storageClassName
+  when: storage_class | length > 0
+  ansible.builtin.set_fact:
+    vm_dv_storage: "{{ vm_dv_storage | combine({'storageClassName': storage_class}) }}"
+
+- name: Build | Add optional DataVolume volumeMode
+  when: volume_mode | length > 0
+  ansible.builtin.set_fact:
+    vm_dv_storage: "{{ vm_dv_storage | combine({'volumeMode': volume_mode}) }}"
+
+- name: Build | Render cloud-init userData
+  ansible.builtin.set_fact:
+    vm_cloud_init_userdata: |
+      #cloud-config
+      user: cloud-user
+      password: "{{ initial_password }}"
+      chpasswd: { expire: False }
+      ssh_pwauth: {{ ssh_password_auth | bool | lower }}
+      {% if ssh_public_key | length > 0 %}
+      ssh_authorized_keys:
+        - "{{ ssh_public_key }}"
+      {% endif %}
+      package_update: true
+      runcmd:
+        - [ sh, -c, "dnf -y install qemu-guest-agent && systemctl enable --now qemu-guest-agent || true" ]
+
+- name: Build | Render VirtualMachine definition
+  ansible.builtin.set_fact:
+    vm_definition:
+      apiVersion: kubevirt.io/v1
+      kind: VirtualMachine
+      metadata:
+        name: "{{ vm_name }}"
+        namespace: "{{ namespace }}"
+        labels:
+          app: "{{ vm_name }}"
+      spec:
+        runStrategy: "{{ run_strategy }}"
+        dataVolumeTemplates:
+          - metadata:
+              name: "{{ vm_name }}-rootdisk"
+            spec:
+              source:
+                http:
+                  url: "{{ image_url }}"
+              storage: "{{ vm_dv_storage }}"
+        template:
+          metadata:
+            labels:
+              kubevirt.io/domain: "{{ vm_name }}"
+          spec:
+            domain:
+              cpu:
+                cores: {{ cpu_cores | int }}
+              resources:
+                requests:
+                  memory: "{{ memory }}"
+              devices:
+                disks:
+                  - name: rootdisk
+                    disk:
+                      bus: virtio
+                  - name: cloudinitdisk
+                    disk:
+                      bus: virtio
+                interfaces:
+                  - name: default
+                    masquerade: {}
+            networks:
+              - name: default
+                pod: {}
+            volumes:
+              - name: rootdisk
+                dataVolume:
+                  name: "{{ vm_name }}-rootdisk"
+              - name: cloudinitdisk
+                cloudInitNoCloud:
+                  userData: "{{ vm_cloud_init_userdata }}"
+
+- name: Build | Show rendered VM definition
+  ansible.builtin.debug:
+    var: vm_definition
+
+# 4) CREATE/APPLY (skipped in --check)
 - name: Create | Ensure target Namespace exists
   when: not ansible_check_mode
   kubernetes.core.k8s:
@@ -92,69 +185,9 @@
     kubeconfig: "{{ kubeconfig }}"
     namespace: "{{ namespace }}"
     state: present
-    definition:
-      apiVersion: kubevirt.io/v1
-      kind: VirtualMachine
-      metadata:
-        name: "{{ vm_name }}"
-        labels: { app: "{{ vm_name }}" }
-      spec:
-        runStrategy: "{{ run_strategy }}"
-        dataVolumeTemplates:
-          - metadata:
-              name: "{{ vm_name }}-rootdisk"
-            spec:
-              source:
-                http: { url: "{{ image_url }}" }
-              storage:
-                resources:
-                  requests:
-                    storage: "{{ disk_size }}"
-                storageClassName: "{{ (storage_class | length > 0) | ternary(storage_class, omit) }}"
-                volumeMode: "{{ (volume_mode | length > 0) | ternary(volume_mode, omit) }}"
-                accessModes: [ "ReadWriteOnce" ]
-        template:
-          metadata:
-            labels: { kubevirt.io/domain: "{{ vm_name }}" }
-          spec:
-            domain:
-              cpu:
-                cores: "{{ cpu_cores | int }}"
-              resources:
-                requests:
-                  memory: "{{ memory }}"
-              devices:
-                disks:
-                  - name: rootdisk
-                    disk: { bus: virtio }
-                  - name: cloudinitdisk
-                    disk: { bus: virtio }
-                interfaces:
-                  - name: default
-                    masquerade: {}
-            networks:
-              - name: default
-                pod: {}
-            volumes:
-              - name: rootdisk
-                dataVolume: { name: "{{ vm_name }}-rootdisk" }
-              - name: cloudinitdisk
-                cloudInitNoCloud:
-                  userData: |
-                    #cloud-config
-                    user: cloud-user
-                    password: "{{ initial_password }}"
-                    chpasswd: { expire: False }
-                    ssh_pwauth: {{ ssh_password_auth | bool }}
-                    {% if ssh_public_key | length > 0 %}
-                    ssh_authorized_keys:
-                      - "{{ ssh_public_key }}"
-                    {% endif %}
-                    package_update: true
-                    runcmd:
-                      - [ sh, -c, "dnf -y install qemu-guest-agent && systemctl enable --now qemu-guest-agent || true" ]
+    definition: "{{ vm_definition }}"
 
-# 4) WAITS (skipped in --check)
+# 5) WAITS (skipped in --check)
 - name: Wait | DataVolume import to complete (Succeeded or Failed)
   when: not ansible_check_mode
   kubernetes.core.k8s_info:
@@ -200,13 +233,13 @@
   retries: "{{ vm_wait_retries | int }}"
   delay: "{{ vm_wait_delay | int }}"
 
-# 5) OUTPUT (always)
+# 6) OUTPUT (always)
 - name: Output | Summary
   ansible.builtin.debug:
     msg:
       - "Namespace: {{ namespace }}"
       - "VM: {{ vm_name }}"
-      - "CPU/Memory: {{ cpu_cores }} cores / {{ memory }}"
+      - "CPU/Memory: {{ cpu_cores | int }} cores / {{ memory }}"
       - "Disk: {{ disk_size }} (SC='{{ storage_class | default('default', true) }}', mode='{{ volume_mode | default('unspecified', true) }}')"
       - "Image: {{ image_url }}"
       - "RunStrategy: {{ run_strategy }}"

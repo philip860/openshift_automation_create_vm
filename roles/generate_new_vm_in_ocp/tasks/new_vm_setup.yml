@@ -29,59 +29,6 @@
         state: present
         backup: false
 
-    - name: Preflight | Verify /etc/hosts resolution
-      ansible.builtin.command:
-        cmd: "getent hosts {{ ocp_api_dns_name }}"
-      register: ocp_hosts_check
-      changed_when: false
-      failed_when: false
-
-    - name: Preflight | Show resolved OpenShift API host
-      ansible.builtin.debug:
-        msg:
-          - "Expected API DNS: {{ ocp_api_dns_name }}"
-          - "Expected API IP: {{ ocp_api_ip }}"
-          - "Resolved result: {{ ocp_hosts_check.stdout | default('NO RESOLUTION FOUND') }}"
-
-    - name: Preflight | Test TCP connection to OpenShift API
-      ansible.builtin.wait_for:
-        host: "{{ ocp_api_dns_name }}"
-        port: 6443
-        timeout: "{{ ocp_api_tcp_timeout | int }}"
-        connect_timeout: 5
-        state: started
-      register: ocp_api_tcp_check
-      failed_when: false
-
-    - name: Preflight | Fail clearly if OpenShift API TCP port is unreachable
-      ansible.builtin.fail:
-        msg: >
-          The DNS fallback was added, but AAP still cannot reach
-          {{ ocp_api_dns_name }}:6443 using IP {{ ocp_api_ip }}.
-
-          This is now a network/routing/firewall/API issue, not a kubeconfig issue.
-
-          Check from the AAP host or EE container:
-          curl -k https://{{ ocp_api_dns_name }}:6443/version
-
-          Also verify:
-          - ocp_api_ip is correct
-          - OpenShift API is online
-          - port 6443 is reachable from AAP
-          - firewall allows AAP to reach {{ ocp_api_ip }}:6443
-      when: ocp_api_tcp_check.elapsed is defined and ocp_api_tcp_check.elapsed >= (ocp_api_tcp_timeout | int)
-
-    - name: Preflight | Test OpenShift API /version endpoint
-      ansible.builtin.command:
-        cmd: "curl -k --connect-timeout {{ ocp_api_curl_timeout | int }} https://{{ ocp_api_dns_name }}:6443/version"
-      register: api_curl_test
-      changed_when: false
-      failed_when: api_curl_test.rc != 0
-
-    - name: Preflight | Show OpenShift API /version response
-      ansible.builtin.debug:
-        var: api_curl_test.stdout
-
     - name: Preflight | Retry API server reachable after /etc/hosts override
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
@@ -99,7 +46,6 @@
     kind: CustomResourceDefinition
     name: virtualmachines.kubevirt.io
     wait: false
-    wait_timeout: "{{ ocp_api_k8s_wait_timeout | int }}"
   register: crd_vm
 
 - name: Preflight | Verify CDI DataVolume CRD exists
@@ -109,7 +55,6 @@
     kind: CustomResourceDefinition
     name: datavolumes.cdi.kubevirt.io
     wait: false
-    wait_timeout: "{{ ocp_api_k8s_wait_timeout | int }}"
   register: crd_dv
 
 - name: Preflight | Fail if required CRDs missing
@@ -117,8 +62,7 @@
     that:
       - crd_vm.resources | length > 0
       - crd_dv.resources | length > 0
-    fail_msg: >
-      Required CRDs missing. Install OpenShift Virtualization (KubeVirt) and CDI.
+    fail_msg: "Required CRDs missing. Install OpenShift Virtualization and CDI."
 
 - name: Preflight | If StorageClass set, ensure it exists
   when: storage_class | length > 0
@@ -128,7 +72,6 @@
     kind: StorageClass
     name: "{{ storage_class }}"
     wait: false
-    wait_timeout: "{{ ocp_api_k8s_wait_timeout | int }}"
   register: sc_info
 
 - name: Preflight | Fail if specified StorageClass not found
@@ -144,17 +87,6 @@
       - image_url is match('^https?://.+')
     fail_msg: "image_url must be HTTP/HTTPS."
 
-- name: Preflight | HEAD check the image_url to avoid CDI retry loops
-  when: not ansible_check_mode
-  ansible.builtin.uri:
-    url: "{{ image_url }}"
-    method: HEAD
-    return_content: false
-    validate_certs: true
-    timeout: 30
-  register: image_head
-  failed_when: image_head.status not in [200]
-
 # 2) PLAN
 
 - name: Plan | Show intended objects
@@ -162,9 +94,9 @@
   ansible.builtin.debug:
     msg:
       - "Would ensure Namespace '{{ namespace }}' exists."
-      - "Would create VM '{{ vm_name }}' with {{ cpu_cores | int }} vCPU, {{ memory }} RAM."
-      - "Would create DataVolume '{{ vm_name }}-rootdisk' size {{ disk_size }}."
-      - "Would import image from '{{ image_url }}'. RunStrategy='{{ run_strategy }}'."
+      - "Would create VM '{{ vm_name }}'."
+      - "Would expose SSH: {{ ssh_expose_enabled }}"
+      - "Requested SSH NodePort: {{ ssh_node_port | default('auto-assigned', true) }}"
 
 # 3) BUILD DEFINITIONS
 
@@ -201,7 +133,8 @@
       {% endif %}
       package_update: true
       runcmd:
-        - [ sh, -c, "dnf -y install qemu-guest-agent && systemctl enable --now qemu-guest-agent || true" ]
+        - [ sh, -c, "dnf -y install qemu-guest-agent openssh-server && systemctl enable --now qemu-guest-agent sshd || true" ]
+        - [ sh, -c, "firewall-cmd --add-service=ssh --permanent && firewall-cmd --reload || true" ]
 
 - name: Build | Render VirtualMachine definition
   ansible.builtin.set_fact:
@@ -213,6 +146,7 @@
         namespace: "{{ namespace }}"
         labels:
           app: "{{ vm_name }}"
+          vm.kubevirt.io/name: "{{ vm_name }}"
       spec:
         runStrategy: "{{ run_strategy }}"
         dataVolumeTemplates:
@@ -227,6 +161,7 @@
           metadata:
             labels:
               kubevirt.io/domain: "{{ vm_name }}"
+              vm.kubevirt.io/name: "{{ vm_name }}"
           spec:
             domain:
               cpu:
@@ -256,11 +191,7 @@
                 cloudInitNoCloud:
                   userData: "{{ vm_cloud_init_userdata }}"
 
-- name: Build | Show rendered VM definition
-  ansible.builtin.debug:
-    var: vm_definition
-
-# 4) CREATE/APPLY
+# 4) CREATE/APPLY VM
 
 - name: Create | Ensure target Namespace exists
   when: not ansible_check_mode
@@ -294,7 +225,6 @@
     name: "{{ vm_name }}-rootdisk"
     namespace: "{{ namespace }}"
     wait: false
-    wait_timeout: "{{ ocp_api_k8s_wait_timeout | int }}"
   register: dv
   until: >
     (dv.resources | length) > 0 and
@@ -316,7 +246,7 @@
       DataVolume import failed. Phase={{ dv.resources[0].status.phase | default('') }}.
       Check importer pod logs and PVC events for details.
 
-- name: Wait | VM to reach a runnable state
+- name: Wait | VM to reach Running state
   when: not ansible_check_mode
   kubernetes.core.k8s_info:
     kubeconfig: "{{ kubeconfig }}"
@@ -325,7 +255,6 @@
     name: "{{ vm_name }}"
     namespace: "{{ namespace }}"
     wait: false
-    wait_timeout: "{{ ocp_api_k8s_wait_timeout | int }}"
   register: vm
   until: >
     (vm.resources | length) > 0 and
@@ -334,7 +263,121 @@
   retries: "{{ vm_wait_retries | int }}"
   delay: "{{ vm_wait_delay | int }}"
 
-# 6) OUTPUT
+# 6) SSH NODEPORT SERVICE + ENDPOINTSLICE
+
+- name: SSH | Wait for virt-launcher pod IP
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ namespace }}"
+    label_selectors:
+      - "vm.kubevirt.io/name={{ vm_name }}"
+      - "kubevirt.io=virt-launcher"
+  register: vm_launcher_pod
+  until: >
+    (vm_launcher_pod.resources | length) > 0 and
+    (vm_launcher_pod.resources[0].status is defined) and
+    (vm_launcher_pod.resources[0].status.podIP | default('')) | length > 0
+  retries: "{{ ssh_vm_pod_wait_retries | int }}"
+  delay: "{{ ssh_vm_pod_wait_delay | int }}"
+
+- name: SSH | Set VM pod IP fact
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  ansible.builtin.set_fact:
+    vm_pod_ip: "{{ vm_launcher_pod.resources[0].status.podIP }}"
+
+- name: SSH | Build Service port definition
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  ansible.builtin.set_fact:
+    ssh_service_port_definition:
+      name: ssh
+      protocol: TCP
+      port: "{{ ssh_service_port | int }}"
+      targetPort: "{{ ssh_target_port | int }}"
+
+- name: SSH | Add manual NodePort if configured
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+    - ssh_node_port | string | length > 0
+  ansible.builtin.set_fact:
+    ssh_service_port_definition: "{{ ssh_service_port_definition | combine({'nodePort': ssh_node_port | int}) }}"
+
+- name: SSH | Create NodePort Service
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{ ssh_service_name }}"
+        namespace: "{{ namespace }}"
+        labels:
+          app: "{{ vm_name }}"
+          vm.kubevirt.io/name: "{{ vm_name }}"
+      spec:
+        type: NodePort
+        ports:
+          - "{{ ssh_service_port_definition }}"
+
+- name: SSH | Create EndpointSlice for VM pod IP
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: discovery.k8s.io/v1
+      kind: EndpointSlice
+      metadata:
+        name: "{{ ssh_endpoint_slice_name }}"
+        namespace: "{{ namespace }}"
+        labels:
+          kubernetes.io/service-name: "{{ ssh_service_name }}"
+          app: "{{ vm_name }}"
+          vm.kubevirt.io/name: "{{ vm_name }}"
+      addressType: IPv4
+      ports:
+        - name: ssh
+          protocol: TCP
+          port: "{{ ssh_target_port | int }}"
+      endpoints:
+        - addresses:
+            - "{{ vm_pod_ip }}"
+
+- name: SSH | Read created SSH Service
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
+    api_version: v1
+    kind: Service
+    name: "{{ ssh_service_name }}"
+    namespace: "{{ namespace }}"
+  register: ssh_service_result
+
+- name: SSH | Set assigned SSH NodePort fact
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  ansible.builtin.set_fact:
+    assigned_ssh_node_port: "{{ ssh_service_result.resources[0].spec.ports[0].nodePort }}"
+
+# 7) OUTPUT
 
 - name: Output | Summary
   ansible.builtin.debug:
@@ -345,3 +388,8 @@
       - "Disk: {{ disk_size }} (SC='{{ storage_class | default('default', true) }}', mode='{{ volume_mode | default('unspecified', true) }}')"
       - "Image: {{ image_url }}"
       - "RunStrategy: {{ run_strategy }}"
+      - "SSH exposed: {{ ssh_expose_enabled }}"
+      - "SSH Service: {{ ssh_service_name if ssh_expose_enabled | bool else 'disabled' }}"
+      - "VM Pod IP used by EndpointSlice: {{ vm_pod_ip | default('not-created') }}"
+      - "SSH NodePort: {{ assigned_ssh_node_port | default('not-created') }}"
+      - "SSH command example: ssh cloud-user@<openshift-node-ip> -p {{ assigned_ssh_node_port | default('NODEPORT') }}"

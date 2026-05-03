@@ -31,16 +31,25 @@ ssh_password_auth: true
 # SSH NodePort exposure
 ssh_expose_enabled: true
 ssh_service_name: "{{ vm_name }}-ssh"
-ssh_endpoint_slice_name: "{{ vm_name }}-ssh-1"
 ssh_service_port: 22
 ssh_target_port: 22
 
-# Leave empty to let OpenShift auto-assign a free NodePort.
-# Set manually if desired, for example: 30022
+# Empty = OpenShift auto-assigns a free NodePort.
+# Example manual value: 30022
 ssh_node_port: ""
 
-ssh_vm_pod_wait_retries: 30
-ssh_vm_pod_wait_delay: 10
+# Service selector used to match the KubeVirt virt-launcher pod.
+ssh_service_selector:
+  vm.kubevirt.io/name: "{{ vm_name }}"
+  kubevirt.io: virt-launcher
+
+# Alternate selector if needed:
+# ssh_service_selector:
+#   kubevirt.io/domain: "{{ vm_name }}"
+#   kubevirt.io: virt-launcher
+
+ssh_endpoint_wait_retries: 12
+ssh_endpoint_wait_delay: 5
 
 # Start policy
 run_strategy: "Always"

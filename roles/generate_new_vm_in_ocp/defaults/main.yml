@@ -3,6 +3,9 @@
 kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
 namespace: "virtual-machines"
 
+#API IP Override
+ocp_api_ip: 10.0.0.6
+
 # VM identity & sizing
 vm_name: "centos9-vm-demo-1"
 cpu_cores: 2

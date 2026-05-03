@@ -1,34 +1,60 @@
 ---
-# 1) PREFLIGHT (runs in --check)
+# 1) PREFLIGHT
 
 - name: Preflight | Verify API server reachable with optional DNS fallback
   block:
-    - name: Preflight | Verify API server reachable (list default Namespace)
+    - name: Preflight | Verify API server reachable using kubeconfig DNS
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         api_version: v1
         kind: Namespace
         name: default
+        request_timeout: "{{ ocp_api_request_timeout | int }}"
       register: api_check
 
   rescue:
-    - name: Preflight | Fail if ocp_api_ip is not defined for DNS fallback
+    - name: Preflight | Fail if ocp_api_ip is not defined
       ansible.builtin.fail:
         msg: >
           Unable to reach the OpenShift API using the DNS name from kubeconfig.
-          Define ocp_api_ip, for example ocp_api_ip: 10.0.0.50, so this role can
-          add a temporary /etc/hosts override inside the AAP execution environment.
+          Define ocp_api_ip, for example ocp_api_ip: 10.0.0.50.
       when: ocp_api_ip is not defined or ocp_api_ip | length == 0
 
     - name: Preflight | Add temporary OpenShift API DNS override inside AAP EE
       ansible.builtin.lineinfile:
         path: /etc/hosts
-        regexp: '^\s*{{ ocp_api_ip | regex_escape }}\s+{{ ocp_api_dns | regex_escape }}\s*$'
-        line: "{{ ocp_api_ip }} {{ ocp_api_dns }}"
+        regexp: '^\s*[0-9a-fA-F:.]+\s+{{ ocp_api_dns_name | regex_escape }}(\s|$)'
+        line: "{{ ocp_api_ip }} {{ ocp_api_dns_name }}"
         state: present
         backup: false
-      vars:
-        ocp_api_dns: "{{ ocp_api_dns_name | default('api.sn05.duncan-networks.com') }}"
+
+    - name: Preflight | Verify /etc/hosts resolution
+      ansible.builtin.command:
+        cmd: "getent hosts {{ ocp_api_dns_name }}"
+      register: ocp_hosts_check
+      changed_when: false
+
+    - name: Preflight | Show resolved OpenShift API host
+      ansible.builtin.debug:
+        var: ocp_hosts_check.stdout
+
+    - name: Preflight | Test TCP connection to OpenShift API
+      ansible.builtin.wait_for:
+        host: "{{ ocp_api_dns_name }}"
+        port: 6443
+        timeout: "{{ ocp_api_tcp_timeout | int }}"
+        state: started
+
+    - name: Preflight | Test OpenShift API /version endpoint
+      ansible.builtin.command:
+        cmd: "curl -k --connect-timeout {{ ocp_api_curl_timeout | int }} https://{{ ocp_api_dns_name }}:6443/version"
+      register: api_curl_test
+      changed_when: false
+      failed_when: api_curl_test.rc != 0
+
+    - name: Preflight | Show OpenShift API /version response
+      ansible.builtin.debug:
+        var: api_curl_test.stdout
 
     - name: Preflight | Retry API server reachable after /etc/hosts override
       kubernetes.core.k8s_info:
@@ -36,6 +62,7 @@
         api_version: v1
         kind: Namespace
         name: default
+        request_timeout: "{{ ocp_api_request_timeout | int }}"
       register: api_check
 
 - name: Preflight | Verify KubeVirt VirtualMachine CRD exists
@@ -44,6 +71,7 @@
     api_version: apiextensions.k8s.io/v1
     kind: CustomResourceDefinition
     name: virtualmachines.kubevirt.io
+    request_timeout: "{{ ocp_api_request_timeout | int }}"
   register: crd_vm
 
 - name: Preflight | Verify CDI DataVolume CRD exists
@@ -52,6 +80,7 @@
     api_version: apiextensions.k8s.io/v1
     kind: CustomResourceDefinition
     name: datavolumes.cdi.kubevirt.io
+    request_timeout: "{{ ocp_api_request_timeout | int }}"
   register: crd_dv
 
 - name: Preflight | Fail if required CRDs missing
@@ -69,6 +98,7 @@
     api_version: storage.k8s.io/v1
     kind: StorageClass
     name: "{{ storage_class }}"
+    request_timeout: "{{ ocp_api_request_timeout | int }}"
   register: sc_info
 
 - name: Preflight | Fail if specified StorageClass not found
@@ -95,18 +125,19 @@
   register: image_head
   failed_when: image_head.status not in [200]
 
-# 2) PLAN (only in --check)
-- name: Plan | Show intended objects (no changes)
+# 2) PLAN
+
+- name: Plan | Show intended objects
   when: ansible_check_mode
   ansible.builtin.debug:
     msg:
       - "Would ensure Namespace '{{ namespace }}' exists."
       - "Would create VM '{{ vm_name }}' with {{ cpu_cores | int }} vCPU, {{ memory }} RAM."
-      - "Would create DataVolume '{{ vm_name }}-rootdisk' size {{ disk_size }}, SC='{{ storage_class | default('default', true) }}', mode='{{ volume_mode | default('unspecified', true) }}'."
+      - "Would create DataVolume '{{ vm_name }}-rootdisk' size {{ disk_size }}."
       - "Would import image from '{{ image_url }}'. RunStrategy='{{ run_strategy }}'."
-      - "SSH key present? {{ (ssh_public_key | length > 0) | ternary('yes', 'no') }}; password auth: {{ ssh_password_auth | bool }}."
 
 # 3) BUILD DEFINITIONS
+
 - name: Build | Base DataVolume storage definition
   ansible.builtin.set_fact:
     vm_dv_storage:
@@ -144,9 +175,7 @@
 
 - name: Build | Render VirtualMachine definition
   ansible.builtin.set_fact:
-    vm_definition: "{{ vm_definition_json }}"
-  vars:
-    vm_definition_json:
+    vm_definition:
       apiVersion: kubevirt.io/v1
       kind: VirtualMachine
       metadata:
@@ -197,34 +226,12 @@
                 cloudInitNoCloud:
                   userData: "{{ vm_cloud_init_userdata }}"
 
-- name: Build | Force cpu cores to integer type
-  ansible.builtin.set_fact:
-    vm_definition: >-
-      {{
-        vm_definition
-        | combine(
-            {
-              'spec': {
-                'template': {
-                  'spec': {
-                    'domain': {
-                      'cpu': {
-                        'cores': (cpu_cores | int)
-                      }
-                    }
-                  }
-                }
-              }
-            },
-            recursive=True
-          )
-      }}
-
 - name: Build | Show rendered VM definition
   ansible.builtin.debug:
     var: vm_definition
 
-# 4) CREATE/APPLY (skipped in --check)
+# 4) CREATE/APPLY
+
 - name: Create | Ensure target Namespace exists
   when: not ansible_check_mode
   kubernetes.core.k8s:
@@ -233,6 +240,7 @@
     kind: Namespace
     name: "{{ namespace }}"
     state: present
+    request_timeout: "{{ ocp_api_request_timeout | int }}"
 
 - name: Create | Define/Apply VirtualMachine with DataVolumeTemplate
   when: not ansible_check_mode
@@ -241,9 +249,11 @@
     namespace: "{{ namespace }}"
     state: present
     definition: "{{ vm_definition }}"
+    request_timeout: "{{ ocp_api_request_timeout | int }}"
 
-# 5) WAITS (skipped in --check)
-- name: Wait | DataVolume import to complete (Succeeded or Failed)
+# 5) WAITS
+
+- name: Wait | DataVolume import to complete
   when: not ansible_check_mode
   kubernetes.core.k8s_info:
     kubeconfig: "{{ kubeconfig }}"
@@ -251,6 +261,7 @@
     kind: DataVolume
     name: "{{ vm_name }}-rootdisk"
     namespace: "{{ namespace }}"
+    request_timeout: "{{ ocp_api_request_timeout | int }}"
   register: dv
   until: >
     (dv.resources | length) > 0 and
@@ -280,6 +291,7 @@
     kind: VirtualMachine
     name: "{{ vm_name }}"
     namespace: "{{ namespace }}"
+    request_timeout: "{{ ocp_api_request_timeout | int }}"
   register: vm
   until: >
     (vm.resources | length) > 0 and
@@ -288,7 +300,8 @@
   retries: "{{ vm_wait_retries | int }}"
   delay: "{{ vm_wait_delay | int }}"
 
-# 6) OUTPUT (always)
+# 6) OUTPUT
+
 - name: Output | Summary
   ansible.builtin.debug:
     msg:
@@ -298,4 +311,3 @@
       - "Disk: {{ disk_size }} (SC='{{ storage_class | default('default', true) }}', mode='{{ volume_mode | default('unspecified', true) }}')"
       - "Image: {{ image_url }}"
       - "RunStrategy: {{ run_strategy }}"
-      - "Note: In --check, no resources were created; see the Plan output."

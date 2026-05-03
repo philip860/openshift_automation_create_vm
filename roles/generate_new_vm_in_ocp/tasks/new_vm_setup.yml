@@ -18,7 +18,7 @@
       ansible.builtin.fail:
         msg: >
           Unable to reach the OpenShift API using the DNS name from kubeconfig.
-          Define ocp_api_ip, for example ocp_api_ip: 10.0.0.50.
+          Define ocp_api_ip, for example ocp_api_ip: 10.0.0.106.
       when: ocp_api_ip is not defined or ocp_api_ip | length == 0
 
     - name: Preflight | Add temporary OpenShift API DNS override inside AAP EE
@@ -28,6 +28,20 @@
         line: "{{ ocp_api_ip }} {{ ocp_api_dns_name }}"
         state: present
         backup: false
+
+    - name: Preflight | Test OpenShift API TCP port
+      ansible.builtin.wait_for:
+        host: "{{ ocp_api_dns_name }}"
+        port: 6443
+        timeout: "{{ ocp_api_tcp_timeout | int }}"
+        connect_timeout: 5
+        state: started
+
+    - name: Preflight | Test OpenShift API /version endpoint
+      ansible.builtin.command:
+        cmd: "curl -k --connect-timeout {{ ocp_api_curl_timeout | int }} https://{{ ocp_api_dns_name }}:6443/version"
+      register: api_curl_test
+      changed_when: false
 
     - name: Preflight | Retry API server reachable after /etc/hosts override
       kubernetes.core.k8s_info:
@@ -46,6 +60,7 @@
     kind: CustomResourceDefinition
     name: virtualmachines.kubevirt.io
     wait: false
+    wait_timeout: "{{ ocp_api_k8s_wait_timeout | int }}"
   register: crd_vm
 
 - name: Preflight | Verify CDI DataVolume CRD exists
@@ -55,6 +70,7 @@
     kind: CustomResourceDefinition
     name: datavolumes.cdi.kubevirt.io
     wait: false
+    wait_timeout: "{{ ocp_api_k8s_wait_timeout | int }}"
   register: crd_dv
 
 - name: Preflight | Fail if required CRDs missing
@@ -72,6 +88,7 @@
     kind: StorageClass
     name: "{{ storage_class }}"
     wait: false
+    wait_timeout: "{{ ocp_api_k8s_wait_timeout | int }}"
   register: sc_info
 
 - name: Preflight | Fail if specified StorageClass not found
@@ -97,6 +114,7 @@
       - "Would create VM '{{ vm_name }}'."
       - "Would expose SSH: {{ ssh_expose_enabled }}"
       - "Requested SSH NodePort: {{ ssh_node_port | default('auto-assigned', true) }}"
+      - "SSH Service selector: {{ ssh_service_selector }}"
 
 # 3) BUILD DEFINITIONS
 
@@ -263,34 +281,7 @@
   retries: "{{ vm_wait_retries | int }}"
   delay: "{{ vm_wait_delay | int }}"
 
-# 6) SSH NODEPORT SERVICE + ENDPOINTSLICE
-
-- name: SSH | Wait for virt-launcher pod IP
-  when:
-    - not ansible_check_mode
-    - ssh_expose_enabled | bool
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
-    api_version: v1
-    kind: Pod
-    namespace: "{{ namespace }}"
-    label_selectors:
-      - "vm.kubevirt.io/name={{ vm_name }}"
-      - "kubevirt.io=virt-launcher"
-  register: vm_launcher_pod
-  until: >
-    (vm_launcher_pod.resources | length) > 0 and
-    (vm_launcher_pod.resources[0].status is defined) and
-    (vm_launcher_pod.resources[0].status.podIP | default('')) | length > 0
-  retries: "{{ ssh_vm_pod_wait_retries | int }}"
-  delay: "{{ ssh_vm_pod_wait_delay | int }}"
-
-- name: SSH | Set VM pod IP fact
-  when:
-    - not ansible_check_mode
-    - ssh_expose_enabled | bool
-  ansible.builtin.set_fact:
-    vm_pod_ip: "{{ vm_launcher_pod.resources[0].status.podIP }}"
+# 6) SSH NODEPORT SERVICE
 
 - name: SSH | Build Service port definition
   when:
@@ -311,7 +302,7 @@
   ansible.builtin.set_fact:
     ssh_service_port_definition: "{{ ssh_service_port_definition | combine({'nodePort': ssh_node_port | int}) }}"
 
-- name: SSH | Create NodePort Service
+- name: SSH | Create NodePort Service using VM selector
   when:
     - not ansible_check_mode
     - ssh_expose_enabled | bool
@@ -329,34 +320,9 @@
           vm.kubevirt.io/name: "{{ vm_name }}"
       spec:
         type: NodePort
+        selector: "{{ ssh_service_selector }}"
         ports:
           - "{{ ssh_service_port_definition }}"
-
-- name: SSH | Create EndpointSlice for VM pod IP
-  when:
-    - not ansible_check_mode
-    - ssh_expose_enabled | bool
-  kubernetes.core.k8s:
-    kubeconfig: "{{ kubeconfig }}"
-    state: present
-    definition:
-      apiVersion: discovery.k8s.io/v1
-      kind: EndpointSlice
-      metadata:
-        name: "{{ ssh_endpoint_slice_name }}"
-        namespace: "{{ namespace }}"
-        labels:
-          kubernetes.io/service-name: "{{ ssh_service_name }}"
-          app: "{{ vm_name }}"
-          vm.kubevirt.io/name: "{{ vm_name }}"
-      addressType: IPv4
-      ports:
-        - name: ssh
-          protocol: TCP
-          port: "{{ ssh_target_port | int }}"
-      endpoints:
-        - addresses:
-            - "{{ vm_pod_ip }}"
 
 - name: SSH | Read created SSH Service
   when:
@@ -377,6 +343,72 @@
   ansible.builtin.set_fact:
     assigned_ssh_node_port: "{{ ssh_service_result.resources[0].spec.ports[0].nodePort }}"
 
+- name: SSH | Wait for OpenShift-created EndpointSlice
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
+    api_version: discovery.k8s.io/v1
+    kind: EndpointSlice
+    namespace: "{{ namespace }}"
+    label_selectors:
+      - "kubernetes.io/service-name={{ ssh_service_name }}"
+  register: ssh_endpoint_slice_result
+  until: >
+    (ssh_endpoint_slice_result.resources | default([]) | length) > 0
+  retries: "{{ ssh_endpoint_wait_retries | int }}"
+  delay: "{{ ssh_endpoint_wait_delay | int }}"
+  failed_when: false
+
+- name: SSH | Fail if OpenShift did not create EndpointSlice
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+    - (ssh_endpoint_slice_result.resources | default([]) | length) == 0
+  ansible.builtin.fail:
+    msg: >
+      OpenShift did not auto-create an EndpointSlice for Service '{{ ssh_service_name }}'.
+
+      This means the Service selector did not match the KubeVirt virt-launcher pod.
+
+      Current selector:
+      {{ ssh_service_selector }}
+
+      Troubleshooting commands:
+      oc get pods -n {{ namespace }} --show-labels | grep {{ vm_name }}
+      oc get svc {{ ssh_service_name }} -n {{ namespace }} -o yaml
+      oc get endpointslice -n {{ namespace }} -l kubernetes.io/service-name={{ ssh_service_name }}
+
+      Try overriding ssh_service_selector in your vars:
+
+      ssh_service_selector:
+        kubevirt.io/domain: "{{ vm_name }}"
+        kubevirt.io: virt-launcher
+
+- name: SSH | Get virt-launcher pod info for summary
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ namespace }}"
+    label_selectors:
+      - "vm.kubevirt.io/name={{ vm_name }}"
+      - "kubevirt.io=virt-launcher"
+  register: vm_launcher_pod_result
+  failed_when: false
+
+- name: SSH | Set VM pod IP summary fact
+  when:
+    - not ansible_check_mode
+    - ssh_expose_enabled | bool
+    - (vm_launcher_pod_result.resources | default([]) | length) > 0
+  ansible.builtin.set_fact:
+    vm_pod_ip: "{{ vm_launcher_pod_result.resources[0].status.podIP | default('unknown') }}"
+
 # 7) OUTPUT
 
 - name: Output | Summary
@@ -390,6 +422,8 @@
       - "RunStrategy: {{ run_strategy }}"
       - "SSH exposed: {{ ssh_expose_enabled }}"
       - "SSH Service: {{ ssh_service_name if ssh_expose_enabled | bool else 'disabled' }}"
-      - "VM Pod IP used by EndpointSlice: {{ vm_pod_ip | default('not-created') }}"
+      - "SSH Service selector: {{ ssh_service_selector if ssh_expose_enabled | bool else 'disabled' }}"
+      - "VM Pod IP: {{ vm_pod_ip | default('not-found') }}"
       - "SSH NodePort: {{ assigned_ssh_node_port | default('not-created') }}"
+      - "EndpointSlice count: {{ ssh_endpoint_slice_result.resources | default([]) | length if ssh_expose_enabled | bool else 0 }}"
       - "SSH command example: ssh cloud-user@<openshift-node-ip> -p {{ assigned_ssh_node_port | default('NODEPORT') }}"

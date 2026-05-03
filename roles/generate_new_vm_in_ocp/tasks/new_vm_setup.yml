@@ -1,12 +1,42 @@
 ---
 # 1) PREFLIGHT (runs in --check)
-- name: Preflight | Verify API server reachable (list default Namespace)
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ kubeconfig }}"
-    api_version: v1
-    kind: Namespace
-    name: default
-  register: api_check
+
+- name: Preflight | Verify API server reachable with optional DNS fallback
+  block:
+    - name: Preflight | Verify API server reachable (list default Namespace)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+        name: default
+      register: api_check
+
+  rescue:
+    - name: Preflight | Fail if ocp_api_ip is not defined for DNS fallback
+      ansible.builtin.fail:
+        msg: >
+          Unable to reach the OpenShift API using the DNS name from kubeconfig.
+          Define ocp_api_ip, for example ocp_api_ip: 10.0.0.50, so this role can
+          add a temporary /etc/hosts override inside the AAP execution environment.
+      when: ocp_api_ip is not defined or ocp_api_ip | length == 0
+
+    - name: Preflight | Add temporary OpenShift API DNS override inside AAP EE
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^\s*{{ ocp_api_ip | regex_escape }}\s+{{ ocp_api_dns | regex_escape }}\s*$'
+        line: "{{ ocp_api_ip }} {{ ocp_api_dns }}"
+        state: present
+        backup: false
+      vars:
+        ocp_api_dns: "{{ ocp_api_dns_name | default('api.sn05.duncan-networks.com') }}"
+
+    - name: Preflight | Retry API server reachable after /etc/hosts override
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+        name: default
+      register: api_check
 
 - name: Preflight | Verify KubeVirt VirtualMachine CRD exists
   kubernetes.core.k8s_info:

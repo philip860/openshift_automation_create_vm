@@ -3,7 +3,7 @@
 kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
 namespace: "virtual-machines"
 
-#API IP Override
+# API IP Override
 ocp_api_dns_name: api.sn05.duncan-networks.com
 ocp_api_ip: 10.0.0.106
 ocp_api_tcp_timeout: 10
@@ -17,19 +17,33 @@ memory: "2Gi"
 disk_size: "30Gi"
 
 # Storage
-storage_class: "lvms-vg1"      # e.g. 'lvms-vg1', 'ocs-storagecluster-ceph-rbd'; empty = default SC
-volume_mode: ""        # "", "Filesystem", or "Block" (try "Filesystem" if imports fail)
+storage_class: "lvms-vg1"
+volume_mode: ""
 
-# Image (CDI HTTP import)
+# Image
 image_url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
 
 # First boot access
-ssh_public_key: ""     # e.g. "ssh-ed25519 AAAA... user@host"
+ssh_public_key: ""
 initial_password: "changeme"
 ssh_password_auth: true
 
+# SSH NodePort exposure
+ssh_expose_enabled: true
+ssh_service_name: "{{ vm_name }}-ssh"
+ssh_endpoint_slice_name: "{{ vm_name }}-ssh-1"
+ssh_service_port: 22
+ssh_target_port: 22
+
+# Leave empty to let OpenShift auto-assign a free NodePort.
+# Set manually if desired, for example: 30022
+ssh_node_port: ""
+
+ssh_vm_pod_wait_retries: 30
+ssh_vm_pod_wait_delay: 10
+
 # Start policy
-run_strategy: "Always" # Always | RerunOnFailure | Halt
+run_strategy: "Always"
 
 # Waits
 dv_wait_retries: 60

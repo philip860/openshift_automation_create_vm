@@ -5,7 +5,7 @@ namespace: "virtual-machines"
 
 #API IP Override
 ocp_api_dns_name: api.sn05.duncan-networks.com
-ocp_api_ip: 10.0.0.6
+ocp_api_ip: 10.0.0.106
 ocp_api_request_timeout: 15
 ocp_api_tcp_timeout: 10
 ocp_api_curl_timeout: 10
